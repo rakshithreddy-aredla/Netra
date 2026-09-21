@@ -107,7 +107,9 @@ export class SafetyEngine {
         if (warningLevel < WarningLevel.MODERATE) {
           warningLevel = WarningLevel.MODERATE;
         }
-        activeDetection = DetectionType.YAWN;
+        if (activeDetection === null) {
+          activeDetection = DetectionType.YAWN;
+        }
         shouldDeductScore = !this.state.lastYawnScoreDeducted;
         detectionType = DetectionType.YAWN;
         this.state.lastYawnScoreDeducted = true;
