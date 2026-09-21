@@ -8,15 +8,28 @@ import {
   Linking,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
+import type { CameraType } from 'expo-camera';
+import {
+  FaceDetectionProvider,
+  useFaceDetection,
+} from '@infinitered/react-native-mlkit-face-detection';
+import type { RNMLKitFaceDetectorOptions } from '@infinitered/react-native-mlkit-face-detection';
 import { DriverProvider, useDriver } from './src/state/DriverContext';
 import { SafetyDashboard, TripSummary } from './src/components/Dashboard';
+import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { DetectionType } from './src/types/SafetyTypes';
+import { extractDriverMetrics } from './src/driverSignals';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
-import { Audio } from 'expo-av';
+import { setAudioModeAsync } from 'expo-audio';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-let demoInterval: ReturnType<typeof setInterval> | null = null;
+const FACE_DETECTION_OPTIONS: RNMLKitFaceDetectorOptions = {
+  performanceMode: 'fast',
+  landmarkMode: true,
+  contourMode: true,
+  classificationMode: true,
+};
 
 const generateDemoMetrics = () => {
   const eyeOpen = 0.2 + Math.random() * 0.8;
@@ -41,20 +54,32 @@ const AppContent: React.FC = () => {
   const [showSummary, setShowSummary] = useState(false);
   const [tripDuration, setTripDuration] = useState(0);
   const [isDemoMode, setIsDemoMode] = useState(false);
+  const [facing, setFacing] = useState<CameraType>('front');
+  const [cameraReady, setCameraReady] = useState(false);
   const [infractionSummary, setInfractionSummary] = useState<Record<DetectionType, number>>(
     Object.fromEntries(Object.values(DetectionType).map(t => [t, 0])) as Record<DetectionType, number>
   );
   const { state, startTrip, stopTrip, processDetection, getTripDuration, getInfractionSummary } = useDriver();
+  const detector = useFaceDetection();
+  const cameraRef = useRef<CameraView | null>(null);
   const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const demoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detectionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const detectionBusyRef = useRef(false);
+  const autoStartedRef = useRef(false);
+  const stateRef = useRef(state);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
 
   const handleTripStart = useCallback(async () => {
     try {
       await activateKeepAwakeAsync();
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        shouldPlayInBackground: true,
+        interruptionMode: 'duckOthers',
       });
     } catch (error) {
       console.warn('Failed to activate keep awake:', error);
@@ -72,9 +97,9 @@ const AppContent: React.FC = () => {
       clearInterval(durationIntervalRef.current);
       durationIntervalRef.current = null;
     }
-    if (demoInterval) {
-      clearInterval(demoInterval);
-      demoInterval = null;
+    if (demoIntervalRef.current) {
+      clearInterval(demoIntervalRef.current);
+      demoIntervalRef.current = null;
     }
 
     try {
@@ -89,14 +114,42 @@ const AppContent: React.FC = () => {
   }, [stopTrip, getInfractionSummary]);
 
   const handleFaceDetection = useCallback((metrics: any) => {
-    if (!state.isMonitoring) return;
+    if (!stateRef.current.isMonitoring) return;
     processDetection(metrics);
-  }, [state.isMonitoring, processDetection]);
+  }, [processDetection]);
+
+  const runFaceDetection = useCallback(async () => {
+    if (detectionBusyRef.current) return;
+    const cam = cameraRef.current;
+    if (!cam || !stateRef.current.isMonitoring) return;
+    detectionBusyRef.current = true;
+    try {
+      const photo = await cam.takePictureAsync({ quality: 0.4, shutterSound: false });
+      if (!photo || !stateRef.current.isMonitoring) return;
+      const result = await detector.detectFaces(photo.uri);
+      if (!result) return;
+      const face = result.faces && result.faces.length > 0 ? result.faces[0] : undefined;
+      const metrics = extractDriverMetrics(face, photo.width, photo.height);
+      if (face) {
+        console.log(`[Netra] Face detected: eye=${metrics.eyeOpenness?.toFixed(2)} mouth=${metrics.mouthOpenness?.toFixed(3)} headTurn=${metrics.headTurn?.toFixed(1)}`);
+      }
+      handleFaceDetection(metrics);
+    } catch (error) {
+      console.warn('[Netra] detection error:', error);
+    } finally {
+      detectionBusyRef.current = false;
+    }
+  }, [detector, handleFaceDetection]);
+
+  const toggleCamera = useCallback(() => {
+    setCameraReady(false);
+    setFacing((current) => (current === 'back' ? 'front' : 'back'));
+  }, []);
 
   const startDemoMode = useCallback(() => {
     setIsDemoMode(true);
     handleTripStart();
-    demoInterval = setInterval(() => {
+    demoIntervalRef.current = setInterval(() => {
       const metrics = generateDemoMetrics();
       handleFaceDetection(metrics);
     }, 500);
@@ -108,16 +161,53 @@ const AppContent: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (autoStartedRef.current) {
+      return;
+    }
+    if (state.isMonitoring) {
+      return;
+    }
+    if (hasPermission?.granted) {
+      autoStartedRef.current = true;
+      handleTripStart();
+    } else if (hasPermission && !hasPermission.granted) {
+      autoStartedRef.current = true;
+      startDemoMode();
+    }
+  }, [hasPermission, state.isMonitoring, handleTripStart, startDemoMode]);
+
+  useEffect(() => {
+    if (state.isMonitoring && hasPermission?.granted && !isDemoMode && cameraReady) {
+      detectionIntervalRef.current = setInterval(() => {
+        runFaceDetection();
+      }, 1500);
+      runFaceDetection();
+    } else {
+      if (detectionIntervalRef.current) {
+        clearInterval(detectionIntervalRef.current);
+        detectionIntervalRef.current = null;
+      }
+    }
+    return () => {
+      if (detectionIntervalRef.current) {
+        clearInterval(detectionIntervalRef.current);
+        detectionIntervalRef.current = null;
+      }
+    };
+  }, [state.isMonitoring, hasPermission?.granted, isDemoMode, cameraReady, runFaceDetection]);
+
+  useEffect(() => {
     return () => {
       if (durationIntervalRef.current) {
         clearInterval(durationIntervalRef.current);
       }
-      if (demoInterval) {
-        clearInterval(demoInterval);
+      if (demoIntervalRef.current) {
+        clearInterval(demoIntervalRef.current);
       }
       deactivateKeepAwake();
+      stopTrip();
     };
-  }, []);
+  }, [stopTrip]);
 
   if (!hasPermission) {
     return (
@@ -203,11 +293,24 @@ const AppContent: React.FC = () => {
 
   return (
     <View style={styles.container}>
-      <View style={styles.cameraPlaceholder}>
-        <Text style={styles.demoText}>🔍 Camera Active - Monitoring...</Text>
-        <Text style={styles.demoSubtext}>Demo mode with simulated data</Text>
+      <View style={styles.cameraSection}>
+        <CameraView
+          ref={cameraRef}
+          style={styles.camera}
+          facing={facing}
+          onCameraReady={() => setCameraReady(true)}
+        />
+        <TouchableOpacity
+          style={styles.cameraToggleButton}
+          onPress={toggleCamera}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.cameraToggleText}>
+            {facing === 'front' ? '⟳ Use Back Camera' : '⟳ Use Front Camera'}
+          </Text>
+        </TouchableOpacity>
       </View>
-      <View style={styles.overlay}>
+      <View style={styles.dashboardSection}>
         <SafetyDashboard onStopTrip={handleTripStop} />
       </View>
     </View>
@@ -223,9 +326,13 @@ const FeatureItem: React.FC<{ icon: string; text: string }> = ({ icon, text }) =
 
 export default function App() {
   return (
-    <DriverProvider>
-      <AppContent />
-    </DriverProvider>
+    <ErrorBoundary>
+      <FaceDetectionProvider options={FACE_DETECTION_OPTIONS}>
+        <DriverProvider>
+          <AppContent />
+        </DriverProvider>
+      </FaceDetectionProvider>
+    </ErrorBoundary>
   );
 }
 
@@ -233,6 +340,30 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: 'black',
+  },
+  cameraSection: {
+    flex: 1,
+  },
+  camera: {
+    flex: 1,
+  },
+  cameraToggleButton: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    backgroundColor: 'rgba(59, 130, 246, 0.85)',
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    zIndex: 10,
+  },
+  cameraToggleText: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: 'white',
+  },
+  dashboardSection: {
+    height: Math.round(SCREEN_HEIGHT * 0.5),
   },
   cameraPlaceholder: {
     flex: 1,
@@ -249,9 +380,6 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#64748b',
     marginTop: 8,
-  },
-  overlay: {
-    flex: 1,
   },
   startContainer: {
     flex: 1,

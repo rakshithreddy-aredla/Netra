@@ -1,10 +1,18 @@
 export enum WarningLevel {
-  NORMAL = 'NORMAL',
-  MILD = 'MILD',
-  MODERATE = 'MODERATE',
-  SEVERE = 'SEVERE',
-  CRITICAL = 'CRITICAL',
+  NORMAL = 0,
+  MILD = 1,
+  MODERATE = 2,
+  SEVERE = 3,
+  CRITICAL = 4,
 }
+
+export const WARNING_LABELS: Record<WarningLevel, string> = {
+  [WarningLevel.NORMAL]: 'NORMAL',
+  [WarningLevel.MILD]: 'MILD',
+  [WarningLevel.MODERATE]: 'MODERATE',
+  [WarningLevel.SEVERE]: 'SEVERE',
+  [WarningLevel.CRITICAL]: 'CRITICAL',
+};
 
 export enum DetectionType {
   EYES_CLOSED = 'EYES_CLOSED',
@@ -46,8 +54,8 @@ export const DEFAULT_CONFIG: SafetyEngineConfig = {
   eyeClosedThreshold: 0.3,
   eyeClosedDurationMs: 1500,
   severeDrowsinessDurationMs: 2500,
-  yawnThreshold: 0.35,
-  yawnDurationMs: 1500,
+  yawnThreshold: 0.04,
+  yawnDurationMs: 1200,
   distractionAngleThreshold: 20,
   distractionDurationMs: 2000,
   scoreDeductionDistraction: 2,

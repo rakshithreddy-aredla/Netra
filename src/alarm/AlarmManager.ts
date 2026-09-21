@@ -1,4 +1,5 @@
-import { Audio } from 'expo-av';
+import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
+import type { AudioPlayer } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import * as Haptics from 'expo-haptics';
 import { Vibration, Platform } from 'react-native';
@@ -38,7 +39,7 @@ const DETECTION_MESSAGES: Record<DetectionType, string> = {
 
 export class AlarmManager {
   private currentAlarmLevel: AlarmLevel;
-  private sirenSound: Audio.Sound | null = null;
+  private sirenSound: AudioPlayer | null = null;
   private isSpeaking: boolean = false;
   private isStrobing: boolean = false;
   private strobeInterval: ReturnType<typeof setInterval> | null = null;
@@ -52,11 +53,10 @@ export class AlarmManager {
 
   private async configureAudio(): Promise<void> {
     try {
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-        staysActiveInBackground: true,
-        shouldDuckAndroid: true,
+      await setAudioModeAsync({
+        playsInSilentMode: true,
+        shouldPlayInBackground: true,
+        interruptionMode: 'duckOthers',
       });
     } catch (error) {
       console.warn('Failed to configure audio mode:', error);
@@ -169,19 +169,27 @@ export class AlarmManager {
     }
   }
 
-  private async playSiren(): Promise<void> {
+  private playSiren(): void {
     try {
       if (this.sirenSound) {
-        await this.sirenSound.unloadAsync();
+        this.sirenSound.remove();
       }
 
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: 'https://www.soundjay.com/misc/sounds/fail-buzzer-01.mp3' },
-        { shouldPlay: true, isLooping: true, volume: 1.0 }
+      const player = createAudioPlayer(
+        'https://www.soundjay.com/misc/sounds/fail-buzzer-01.mp3'
       );
-      this.sirenSound = sound;
+      player.loop = true;
+      player.volume = 1.0;
+      player.play();
+      this.sirenSound = player;
     } catch (error) {
-      console.warn('Siren playback error:', error);
+      console.error('Siren playback failed, using fallback alert:', error);
+      try {
+        void this.speak('Critical alert! Please pull over immediately!');
+        Vibration.vibrate([0, 500, 200, 500, 200, 500]);
+      } catch (fallbackError) {
+        console.error('Fallback alert also failed:', fallbackError);
+      }
     }
   }
 
@@ -211,16 +219,17 @@ export class AlarmManager {
 
     if (this.sirenSound) {
       try {
-        await this.sirenSound.stopAsync();
-        await this.sirenSound.unloadAsync();
-      } catch {
+        this.sirenSound.remove();
+      } catch (error) {
+        console.error('Error releasing siren sound:', error);
       }
       this.sirenSound = null;
     }
 
     try {
       await Speech.stop();
-    } catch {
+    } catch (error) {
+      console.error('Error stopping speech:', error);
     }
 
     this.isSpeaking = false;

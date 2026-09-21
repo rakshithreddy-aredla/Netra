@@ -1,6 +1,5 @@
 import type {
   RNMLKitFace,
-  RNMLKitFaceContour,
   RNMLKitFaceLandmark,
 } from '@infinitered/react-native-mlkit-face-detection';
 
@@ -16,34 +15,45 @@ export type DriverMetrics = {
   faceSizeRatio: number | null;
 };
 
+const LANDMARK_INDEX: Record<string, number> = {
+  bottomMouth: 0,
+  leftCheek: 1,
+  leftEar: 2,
+  leftEye: 3,
+  leftMouth: 4,
+  noseBase: 5,
+  rightCheek: 6,
+  rightEar: 7,
+  rightEye: 8,
+  rightMouth: 9,
+  leftEarTip: 10,
+  rightEarTip: 11,
+};
+
+const matchesType = (
+  actual: string | number | null | undefined,
+  name: string,
+  index: number,
+): boolean => {
+  if (actual === null || actual === undefined) {
+    return false;
+  }
+  if (actual === name) {
+    return true;
+  }
+  return Number(actual) === index;
+};
+
 const landmarkPosition = (
   landmarks: RNMLKitFaceLandmark[],
-  type: RNMLKitFaceLandmark['type'],
-) => landmarks.find((landmark) => landmark.type === type)?.position ?? null;
+  name: string,
+  index: number,
+): { x: number; y: number } | null =>
+  landmarks.find((landmark) => matchesType(landmark.type, name, index))?.position ??
+  null;
 
-const contourPoints = (
-  contours: RNMLKitFaceContour[],
-  type: RNMLKitFaceContour['type'],
-) => contours.find((contour) => contour.type === type)?.points ?? null;
-
-const averageY = (points: Array<{ x: number; y: number }> | null) => {
-  if (!points?.length) {
-    return null;
-  }
-
-  return points.reduce((sum, point) => sum + point.y, 0) / points.length;
-};
-
-const distance = (
-  first: { x: number; y: number } | null,
-  second: { x: number; y: number } | null,
-) => {
-  if (!first || !second) {
-    return null;
-  }
-
-  return Math.hypot(first.x - second.x, first.y - second.y);
-};
+const toPositive = (value: number | null | undefined): number | null =>
+  value === null || value === undefined ? null : Math.abs(value);
 
 export const extractDriverMetrics = (
   face: RNMLKitFace | undefined,
@@ -64,12 +74,8 @@ export const extractDriverMetrics = (
     };
   }
 
-  const leftEye = face.hasLeftEyeOpenProbability
-    ? (face.leftEyeOpenProbability ?? 1)
-    : null;
-  const rightEye = face.hasRightEyeOpenProbability
-    ? (face.rightEyeOpenProbability ?? 1)
-    : null;
+  const leftEye = face.leftEyeOpenProbability ?? null;
+  const rightEye = face.rightEyeOpenProbability ?? null;
   const eyeValues = [leftEye, rightEye].filter(
     (value): value is number => value !== null,
   );
@@ -77,14 +83,12 @@ export const extractDriverMetrics = (
     ? eyeValues.reduce((sum, value) => sum + value, 0) / eyeValues.length
     : null;
 
-  const leftMouth = landmarkPosition(face.landmarks, 'leftMouth');
-  const rightMouth = landmarkPosition(face.landmarks, 'rightMouth');
-  const mouthWidth = distance(leftMouth, rightMouth);
-  const upperLipY = averageY(contourPoints(face.contours, 'upperLipBottom'));
-  const lowerLipY = averageY(contourPoints(face.contours, 'lowerLipTop'));
+  const noseBase = landmarkPosition(face.landmarks, 'noseBase', LANDMARK_INDEX.noseBase);
+  const bottomMouth = landmarkPosition(face.landmarks, 'bottomMouth', LANDMARK_INDEX.bottomMouth);
+  const faceHeight = face.frame.size.y;
   const mouthOpenness =
-    mouthWidth && upperLipY !== null && lowerLipY !== null
-      ? Math.max(0, lowerLipY - upperLipY) / mouthWidth
+    noseBase && bottomMouth && faceHeight > 0
+      ? Math.max(0, bottomMouth.y - noseBase.y) / faceHeight
       : null;
 
   const faceCenterX =
@@ -96,15 +100,9 @@ export const extractDriverMetrics = (
     faceDetected: true,
     eyeOpenness,
     mouthOpenness,
-    headTurn: face.hasHeadEulerAngleY
-      ? Math.abs(face.headEulerAngleY ?? 0)
-      : null,
-    headPitch: face.hasHeadEulerAngleX
-      ? Math.abs(face.headEulerAngleX ?? 0)
-      : null,
-    headRoll: face.hasHeadEulerAngleZ
-      ? Math.abs(face.headEulerAngleZ ?? 0)
-      : null,
+    headTurn: toPositive(face.headEulerAngleY),
+    headPitch: toPositive(face.headEulerAngleX),
+    headRoll: toPositive(face.headEulerAngleZ),
     faceCenterX,
     faceCenterY,
     faceSizeRatio: face.frame.size.x / imageWidth,

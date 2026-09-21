@@ -2,8 +2,8 @@ import React, { createContext, useContext, useReducer, useCallback, useRef, useE
 import { SafetyEngine, safetyEngine } from '../safety/SafetyEngine';
 import { getAlarmManager } from '../alarm/AlarmManager';
 import type { DriverMetrics } from '../driverSignals';
-import type { SafetyState, Infraction, WarningLevel, DetectionType } from '../types/SafetyTypes';
-import { DEFAULT_CONFIG } from '../types/SafetyTypes';
+import type { SafetyState, Infraction } from '../types/SafetyTypes';
+import { DEFAULT_CONFIG, WarningLevel, DetectionType } from '../types/SafetyTypes';
 
 type DriverAction =
   | { type: 'START_TRIP' }

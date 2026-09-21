@@ -20,6 +20,11 @@ expo-env.d.ts
 
 # Metro
 .metro-health-check*
+metro.log
+
+# IDE
+.idea/
+.claude/
 
 # debug
 npm-debug.*

@@ -1,7 +1,7 @@
 import React from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Dimensions } from 'react-native';
 import { useDriver } from '../state/DriverContext';
-import { WarningLevel, DetectionType } from '../types/SafetyTypes';
+import { WarningLevel, DetectionType, WARNING_LABELS } from '../types/SafetyTypes';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
@@ -79,6 +79,14 @@ export const SafetyDashboard: React.FC<SafetyDashboardProps> = ({ onStopTrip }) 
 
   return (
     <View style={styles.container}>
+      <TouchableOpacity
+        style={styles.stopButton}
+        onPress={onStopTrip}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.stopButtonText}>■ END TRIP</Text>
+      </TouchableOpacity>
+
       <View style={styles.topBar}>
         <View style={[styles.scoreContainer, { backgroundColor: scoreColor }]}>
           <Text style={styles.scoreLabel}>RIDE SAFETY SCORE</Text>
@@ -104,7 +112,7 @@ export const SafetyDashboard: React.FC<SafetyDashboardProps> = ({ onStopTrip }) 
         <View style={styles.metricBox}>
           <Text style={styles.metricLabel}>WARNING LEVEL</Text>
           <Text style={[styles.metricValue, { color: warningColor }]}>
-            {warningLevel}
+            {WARNING_LABELS[warningLevel]}
           </Text>
         </View>
       </View>
@@ -129,14 +137,6 @@ export const SafetyDashboard: React.FC<SafetyDashboardProps> = ({ onStopTrip }) 
           />
         </View>
       </View>
-
-      <TouchableOpacity
-        style={styles.stopButton}
-        onPress={onStopTrip}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.stopButtonText}>STOP TRIP</Text>
-      </TouchableOpacity>
     </View>
   );
 };
@@ -215,77 +215,76 @@ export const TripSummary: React.FC<TripSummaryProps> = ({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 16,
+    padding: 12,
     backgroundColor: 'rgba(0, 0, 0, 0.85)',
   },
   topBar: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'flex-start',
-    marginBottom: 20,
+    marginBottom: 10,
   },
   scoreContainer: {
-    borderRadius: 16,
-    padding: 16,
+    borderRadius: 14,
+    padding: 10,
     alignItems: 'center',
-    minWidth: 140,
+    minWidth: 120,
   },
   scoreLabel: {
-    fontSize: 12,
+    fontSize: 10,
     fontWeight: '600',
     color: 'white',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   scoreValue: {
-    fontSize: 48,
+    fontSize: 34,
     fontWeight: 'bold',
     color: 'white',
   },
   statusContainer: {
-    borderWidth: 3,
+    borderWidth: 2,
     borderRadius: 12,
-    padding: 12,
+    padding: 8,
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
   },
   statusText: {
-    fontSize: 16,
+    fontSize: 14,
     fontWeight: 'bold',
   },
   metricsContainer: {
     flexDirection: 'row',
     justifyContent: 'space-between',
-    marginBottom: 20,
+    marginBottom: 10,
   },
   metricBox: {
     backgroundColor: 'rgba(75, 75, 75, 0.6)',
-    borderRadius: 12,
-    padding: 12,
+    borderRadius: 10,
+    padding: 8,
     alignItems: 'center',
     flex: 1,
-    marginHorizontal: 4,
+    marginHorizontal: 3,
   },
   metricLabel: {
-    fontSize: 10,
+    fontSize: 9,
     fontWeight: '600',
     color: '#9ca3af',
-    marginBottom: 4,
+    marginBottom: 2,
   },
   metricValue: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: 'bold',
     color: 'white',
   },
   detectionIndicators: {
     backgroundColor: 'rgba(75, 75, 75, 0.6)',
-    borderRadius: 12,
-    padding: 16,
-    marginBottom: 20,
+    borderRadius: 10,
+    padding: 10,
   },
   indicatorsTitle: {
-    fontSize: 14,
+    fontSize: 12,
     fontWeight: '600',
     color: '#9ca3af',
-    marginBottom: 12,
+    marginBottom: 8,
   },
   indicatorRow: {
     flexDirection: 'row',
@@ -295,10 +294,10 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   dot: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    marginBottom: 6,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    marginBottom: 4,
   },
   dotActive: {
     shadowColor: '#fff',
@@ -307,21 +306,24 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
   },
   dotLabel: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '500',
     color: '#9ca3af',
   },
   stopButton: {
     backgroundColor: '#ef4444',
     borderRadius: 12,
-    padding: 16,
+    paddingVertical: 14,
     alignItems: 'center',
-    marginTop: 'auto',
+    marginBottom: 10,
+    borderWidth: 2,
+    borderColor: 'rgba(255, 255, 255, 0.25)',
   },
   stopButtonText: {
     fontSize: 18,
     fontWeight: 'bold',
     color: 'white',
+    letterSpacing: 2,
   },
   summaryContainer: {
     flex: 1,
