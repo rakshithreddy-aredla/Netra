@@ -4,7 +4,7 @@ import {
   View,
   Text,
   TouchableOpacity,
-  Dimensions,
+  useWindowDimensions,
   Linking,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
@@ -18,11 +18,10 @@ import { DriverProvider, useDriver } from './src/state/DriverContext';
 import { SafetyDashboard, TripSummary } from './src/components/Dashboard';
 import { ErrorBoundary } from './src/components/ErrorBoundary';
 import { DetectionType } from './src/types/SafetyTypes';
-import { extractDriverMetrics } from './src/driverSignals';
+import { useFaceDetectionLoop } from './src/hooks/useFaceDetectionLoop';
+import { DemoSignalSource } from './src/demo/demoSignals';
 import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
 import { setAudioModeAsync } from 'expo-audio';
-
-const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 const FACE_DETECTION_OPTIONS: RNMLKitFaceDetectorOptions = {
   performanceMode: 'fast',
@@ -31,25 +30,10 @@ const FACE_DETECTION_OPTIONS: RNMLKitFaceDetectorOptions = {
   classificationMode: true,
 };
 
-const generateDemoMetrics = () => {
-  const eyeOpen = 0.2 + Math.random() * 0.8;
-  const mouthOpen = Math.random() > 0.95 ? 0.4 + Math.random() * 0.4 : 0.05 + Math.random() * 0.15;
-  const headTurn = Math.random() > 0.9 ? 15 + Math.random() * 30 : Math.random() * 10;
-  
-  return {
-    faceDetected: true,
-    eyeOpenness: eyeOpen,
-    mouthOpenness: mouthOpen,
-    headTurn: headTurn,
-    headPitch: Math.random() * 5,
-    headRoll: Math.random() * 5,
-    faceCenterX: 0.5,
-    faceCenterY: 0.4,
-    faceSizeRatio: 0.6,
-  };
-};
+const DEMO_INTERVAL_MS = 500;
 
 const AppContent: React.FC = () => {
+  const { height: SCREEN_HEIGHT } = useWindowDimensions();
   const [hasPermission, requestPermission] = useCameraPermissions();
   const [showSummary, setShowSummary] = useState(false);
   const [tripDuration, setTripDuration] = useState(0);
@@ -64,16 +48,23 @@ const AppContent: React.FC = () => {
   const cameraRef = useRef<CameraView | null>(null);
   const durationIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const demoIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const detectionIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const detectionBusyRef = useRef(false);
-  const autoStartedRef = useRef(false);
-  const stateRef = useRef(state);
+  const demoSourceRef = useRef(new DemoSignalSource());
 
-  useEffect(() => {
-    stateRef.current = state;
-  }, [state]);
+  const clearTripTimers = useCallback(() => {
+    if (durationIntervalRef.current) {
+      clearInterval(durationIntervalRef.current);
+      durationIntervalRef.current = null;
+    }
+    if (demoIntervalRef.current) {
+      clearInterval(demoIntervalRef.current);
+      demoIntervalRef.current = null;
+    }
+  }, []);
 
   const handleTripStart = useCallback(async () => {
+    // Never stack intervals if a start is triggered twice.
+    clearTripTimers();
+
     try {
       await activateKeepAwakeAsync();
       await setAudioModeAsync({
@@ -86,21 +77,15 @@ const AppContent: React.FC = () => {
     }
 
     startTrip();
+    setShowSummary(false);
 
     durationIntervalRef.current = setInterval(() => {
       setTripDuration(getTripDuration());
     }, 1000);
-  }, [startTrip, getTripDuration]);
+  }, [startTrip, getTripDuration, clearTripTimers]);
 
   const handleTripStop = useCallback(async () => {
-    if (durationIntervalRef.current) {
-      clearInterval(durationIntervalRef.current);
-      durationIntervalRef.current = null;
-    }
-    if (demoIntervalRef.current) {
-      clearInterval(demoIntervalRef.current);
-      demoIntervalRef.current = null;
-    }
+    clearTripTimers();
 
     try {
       await deactivateKeepAwake();
@@ -111,35 +96,20 @@ const AppContent: React.FC = () => {
     setInfractionSummary(getInfractionSummary());
     setShowSummary(true);
     stopTrip();
-  }, [stopTrip, getInfractionSummary]);
+  }, [stopTrip, getInfractionSummary, clearTripTimers]);
 
-  const handleFaceDetection = useCallback((metrics: any) => {
-    if (!stateRef.current.isMonitoring) return;
+  const handleFaceDetection = useCallback((metrics: Parameters<typeof processDetection>[0]) => {
     processDetection(metrics);
   }, [processDetection]);
 
-  const runFaceDetection = useCallback(async () => {
-    if (detectionBusyRef.current) return;
-    const cam = cameraRef.current;
-    if (!cam || !stateRef.current.isMonitoring) return;
-    detectionBusyRef.current = true;
-    try {
-      const photo = await cam.takePictureAsync({ quality: 0.4, shutterSound: false });
-      if (!photo || !stateRef.current.isMonitoring) return;
-      const result = await detector.detectFaces(photo.uri);
-      if (!result) return;
-      const face = result.faces && result.faces.length > 0 ? result.faces[0] : undefined;
-      const metrics = extractDriverMetrics(face, photo.width, photo.height);
-      if (face) {
-        console.log(`[Netra] Face detected: eye=${metrics.eyeOpenness?.toFixed(2)} mouth=${metrics.mouthOpenness?.toFixed(3)} headTurn=${metrics.headTurn?.toFixed(1)}`);
-      }
-      handleFaceDetection(metrics);
-    } catch (error) {
-      console.warn('[Netra] detection error:', error);
-    } finally {
-      detectionBusyRef.current = false;
-    }
-  }, [detector, handleFaceDetection]);
+  // The hook additionally pauses itself while the app is backgrounded.
+  const { appActive } = useFaceDetectionLoop({
+    cameraRef,
+    detector,
+    enabled:
+      state.isMonitoring && !!hasPermission?.granted && !isDemoMode && cameraReady,
+    onMetrics: handleFaceDetection,
+  });
 
   const toggleCamera = useCallback(() => {
     setCameraReady(false);
@@ -148,11 +118,11 @@ const AppContent: React.FC = () => {
 
   const startDemoMode = useCallback(() => {
     setIsDemoMode(true);
-    handleTripStart();
+    demoSourceRef.current.reset();
+    void handleTripStart();
     demoIntervalRef.current = setInterval(() => {
-      const metrics = generateDemoMetrics();
-      handleFaceDetection(metrics);
-    }, 500);
+      handleFaceDetection(demoSourceRef.current.next());
+    }, DEMO_INTERVAL_MS);
   }, [handleTripStart, handleFaceDetection]);
 
   const handleSummaryClose = useCallback(() => {
@@ -161,53 +131,12 @@ const AppContent: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    if (autoStartedRef.current) {
-      return;
-    }
-    if (state.isMonitoring) {
-      return;
-    }
-    if (hasPermission?.granted) {
-      autoStartedRef.current = true;
-      handleTripStart();
-    } else if (hasPermission && !hasPermission.granted) {
-      autoStartedRef.current = true;
-      startDemoMode();
-    }
-  }, [hasPermission, state.isMonitoring, handleTripStart, startDemoMode]);
-
-  useEffect(() => {
-    if (state.isMonitoring && hasPermission?.granted && !isDemoMode && cameraReady) {
-      detectionIntervalRef.current = setInterval(() => {
-        runFaceDetection();
-      }, 1500);
-      runFaceDetection();
-    } else {
-      if (detectionIntervalRef.current) {
-        clearInterval(detectionIntervalRef.current);
-        detectionIntervalRef.current = null;
-      }
-    }
     return () => {
-      if (detectionIntervalRef.current) {
-        clearInterval(detectionIntervalRef.current);
-        detectionIntervalRef.current = null;
-      }
-    };
-  }, [state.isMonitoring, hasPermission?.granted, isDemoMode, cameraReady, runFaceDetection]);
-
-  useEffect(() => {
-    return () => {
-      if (durationIntervalRef.current) {
-        clearInterval(durationIntervalRef.current);
-      }
-      if (demoIntervalRef.current) {
-        clearInterval(demoIntervalRef.current);
-      }
-      deactivateKeepAwake();
+      clearTripTimers();
+      void deactivateKeepAwake();
       stopTrip();
     };
-  }, [stopTrip]);
+  }, [stopTrip, clearTripTimers]);
 
   if (!hasPermission) {
     return (
@@ -219,8 +148,8 @@ const AppContent: React.FC = () => {
         <TouchableOpacity style={styles.permissionButton} onPress={requestPermission}>
           <Text style={styles.permissionButtonText}>Grant Permission</Text>
         </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.permissionButton, styles.demoButton]} 
+        <TouchableOpacity
+          style={[styles.permissionButton, styles.demoButton]}
           onPress={startDemoMode}
         >
           <Text style={styles.permissionButtonText}>Try Demo Mode</Text>
@@ -239,8 +168,8 @@ const AppContent: React.FC = () => {
         <TouchableOpacity style={styles.permissionButton} onPress={() => Linking.openSettings()}>
           <Text style={styles.permissionButtonText}>Open Settings</Text>
         </TouchableOpacity>
-        <TouchableOpacity 
-          style={[styles.permissionButton, styles.demoButton]} 
+        <TouchableOpacity
+          style={[styles.permissionButton, styles.demoButton]}
           onPress={startDemoMode}
         >
           <Text style={styles.permissionButtonText}>Try Demo Mode</Text>
@@ -278,14 +207,23 @@ const AppContent: React.FC = () => {
 
         <TouchableOpacity
           style={styles.startButton}
+          onPress={handleTripStart}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.startButtonText}>START TRIP</Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.startButtonSecondary}
           onPress={startDemoMode}
           activeOpacity={0.8}
         >
-          <Text style={styles.startButtonText}>START TRIP (DEMO)</Text>
+          <Text style={styles.startButtonSecondaryText}>START IN DEMO MODE</Text>
         </TouchableOpacity>
 
         <Text style={styles.disclaimer}>
-          For demo purposes only. Always drive safely.
+          The camera feed is analysed on-device and never leaves your phone.
+          {'\n'}For research and demonstration purposes. Always drive safely.
         </Text>
       </View>
     );
@@ -298,6 +236,7 @@ const AppContent: React.FC = () => {
           ref={cameraRef}
           style={styles.camera}
           facing={facing}
+          active={appActive}
           onCameraReady={() => setCameraReady(true)}
         />
         <TouchableOpacity
@@ -309,8 +248,13 @@ const AppContent: React.FC = () => {
             {facing === 'front' ? '⟳ Use Back Camera' : '⟳ Use Front Camera'}
           </Text>
         </TouchableOpacity>
+        {isDemoMode && (
+          <View style={styles.demoBadge}>
+            <Text style={styles.demoBadgeText}>DEMO MODE — SIMULATED SIGNALS</Text>
+          </View>
+        )}
       </View>
-      <View style={styles.dashboardSection}>
+      <View style={[styles.dashboardSection, { height: Math.round(SCREEN_HEIGHT * 0.5) }]}>
         <SafetyDashboard onStopTrip={handleTripStop} />
       </View>
     </View>
@@ -362,24 +306,24 @@ const styles = StyleSheet.create({
     fontWeight: 'bold',
     color: 'white',
   },
+  demoBadge: {
+    position: 'absolute',
+    bottom: 16,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.9)',
+    borderRadius: 10,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    zIndex: 10,
+  },
+  demoBadgeText: {
+    color: 'white',
+    fontSize: 11,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
   dashboardSection: {
-    height: Math.round(SCREEN_HEIGHT * 0.5),
-  },
-  cameraPlaceholder: {
-    flex: 1,
-    backgroundColor: '#1a1a2e',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  demoText: {
-    fontSize: 20,
-    color: '#3b82f6',
-    fontWeight: 'bold',
-  },
-  demoSubtext: {
-    fontSize: 14,
-    color: '#64748b',
-    marginTop: 8,
+    // Height is supplied inline from useWindowDimensions.
   },
   startContainer: {
     flex: 1,
@@ -390,7 +334,7 @@ const styles = StyleSheet.create({
   },
   logoContainer: {
     alignItems: 'center',
-    marginBottom: 48,
+    marginBottom: 40,
   },
   logoIcon: {
     fontSize: 64,
@@ -409,7 +353,7 @@ const styles = StyleSheet.create({
   },
   featuresContainer: {
     width: '100%',
-    marginBottom: 48,
+    marginBottom: 40,
   },
   featureItem: {
     flexDirection: 'row',
@@ -431,8 +375,8 @@ const styles = StyleSheet.create({
   startButton: {
     backgroundColor: '#3b82f6',
     borderRadius: 16,
-    paddingVertical: 20,
-    paddingHorizontal: 64,
+    paddingVertical: 18,
+    paddingHorizontal: 56,
     shadowColor: '#3b82f6',
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.4,
@@ -445,11 +389,27 @@ const styles = StyleSheet.create({
     color: 'white',
     letterSpacing: 2,
   },
+  startButtonSecondary: {
+    marginTop: 12,
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#10b981',
+    paddingVertical: 12,
+    paddingHorizontal: 32,
+  },
+  startButtonSecondaryText: {
+    fontSize: 13,
+    fontWeight: 'bold',
+    color: '#10b981',
+    letterSpacing: 1,
+  },
   disclaimer: {
     marginTop: 24,
     fontSize: 12,
     color: '#64748b',
     textAlign: 'center',
+    lineHeight: 18,
   },
   permissionContainer: {
     flex: 1,

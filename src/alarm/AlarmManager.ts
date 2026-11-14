@@ -2,25 +2,20 @@ import { createAudioPlayer, setAudioModeAsync } from 'expo-audio';
 import type { AudioPlayer } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import * as Haptics from 'expo-haptics';
-import { Vibration, Platform } from 'react-native';
+import { Vibration } from 'react-native';
 import { WarningLevel, DetectionType } from '../types/SafetyTypes';
 import * as Device from 'expo-device';
 
+/**
+ * Visual alerting is owned by the Dashboard, which can actually render it.
+ * The alarm manager only owns what a non-component can drive: audio and haptics.
+ */
 export enum AlarmLevel {
   NONE = 0,
   VOICE_ALERT = 1,
   HAPTIC_FEEDBACK = 2,
   SIREN = 3,
-  STROBE = 4,
 }
-
-export type AlarmConfig = {
-  voiceMessageNormal: string;
-  voiceMessageMild: string;
-  voiceMessageModerate: string;
-  voiceMessageSevere: string;
-  voiceMessageCritical: string;
-};
 
 const VOICE_MESSAGES: Record<WarningLevel, string> = {
   [WarningLevel.NORMAL]: 'Monitoring active. Stay safe.',
@@ -35,20 +30,26 @@ const DETECTION_MESSAGES: Record<DetectionType, string> = {
   [DetectionType.YAWN]: 'Yawning detected. Stay alert!',
   [DetectionType.DISTRACTION]: 'Looking away from road!',
   [DetectionType.SEVERE_DROWSINESS]: 'Severe drowsiness! Pull over now!',
+  [DetectionType.FACE_UNSEEN]: 'Your face is not visible! Pull over!',
+};
+
+const ALARM_LEVEL_BY_WARNING: Record<WarningLevel, AlarmLevel> = {
+  [WarningLevel.NORMAL]: AlarmLevel.NONE,
+  [WarningLevel.MILD]: AlarmLevel.VOICE_ALERT,
+  [WarningLevel.MODERATE]: AlarmLevel.HAPTIC_FEEDBACK,
+  [WarningLevel.SEVERE]: AlarmLevel.SIREN,
+  [WarningLevel.CRITICAL]: AlarmLevel.SIREN,
 };
 
 export class AlarmManager {
-  private currentAlarmLevel: AlarmLevel;
+  private currentAlarmLevel: AlarmLevel = AlarmLevel.NONE;
   private sirenSound: AudioPlayer | null = null;
-  private isSpeaking: boolean = false;
-  private isStrobing: boolean = false;
-  private strobeInterval: ReturnType<typeof setInterval> | null = null;
-  private lastVoiceAlert: number = 0;
-  private voiceAlertCooldownMs: number = 5000;
+  private isSpeaking = false;
+  private lastVoiceAlert = 0;
+  private voiceAlertCooldownMs = 5000;
 
   constructor() {
-    this.currentAlarmLevel = AlarmLevel.NONE;
-    this.configureAudio();
+    void this.configureAudio();
   }
 
   private async configureAudio(): Promise<void> {
@@ -63,24 +64,36 @@ export class AlarmManager {
     }
   }
 
+  /**
+   * Idempotent by warning level: re-arming an alarm that is already sounding at
+   * the same level is a no-op, so a sustained condition does not restart speech
+   * or churn native audio resources once per detection frame.
+   */
   async triggerAlarm(
     warningLevel: WarningLevel,
-    detectionType?: DetectionType
+    detectionType?: DetectionType,
   ): Promise<void> {
-    const now = Date.now();
-    const alarmLevel = this.getAlarmLevel(warningLevel);
+    const alarmLevel = ALARM_LEVEL_BY_WARNING[warningLevel] ?? AlarmLevel.NONE;
+
+    if (alarmLevel === this.currentAlarmLevel) {
+      return;
+    }
 
     this.currentAlarmLevel = alarmLevel;
 
-    if (alarmLevel >= AlarmLevel.VOICE_ALERT) {
-      const message = detectionType
-        ? DETECTION_MESSAGES[detectionType]
-        : VOICE_MESSAGES[warningLevel];
+    if (alarmLevel === AlarmLevel.NONE) {
+      await this.stopAllAlarms();
+      return;
+    }
 
-      if (now - this.lastVoiceAlert >= this.voiceAlertCooldownMs) {
-        await this.speak(message);
-        this.lastVoiceAlert = now;
-      }
+    const now = Date.now();
+    if (now - this.lastVoiceAlert >= this.voiceAlertCooldownMs) {
+      await this.speak(
+        detectionType
+          ? DETECTION_MESSAGES[detectionType]
+          : VOICE_MESSAGES[warningLevel],
+      );
+      this.lastVoiceAlert = now;
     }
 
     if (alarmLevel >= AlarmLevel.HAPTIC_FEEDBACK) {
@@ -88,28 +101,7 @@ export class AlarmManager {
     }
 
     if (alarmLevel >= AlarmLevel.SIREN) {
-      await this.playSiren();
-    }
-
-    if (alarmLevel >= AlarmLevel.STROBE) {
-      this.startStrobe();
-    }
-  }
-
-  private getAlarmLevel(warningLevel: WarningLevel): AlarmLevel {
-    switch (warningLevel) {
-      case WarningLevel.NORMAL:
-        return AlarmLevel.NONE;
-      case WarningLevel.MILD:
-        return AlarmLevel.VOICE_ALERT;
-      case WarningLevel.MODERATE:
-        return AlarmLevel.HAPTIC_FEEDBACK;
-      case WarningLevel.SEVERE:
-        return AlarmLevel.SIREN;
-      case WarningLevel.CRITICAL:
-        return AlarmLevel.STROBE;
-      default:
-        return AlarmLevel.NONE;
+      this.playSiren();
     }
   }
 
@@ -149,15 +141,9 @@ export class AlarmManager {
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
           break;
         case WarningLevel.SEVERE:
-          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          await new Promise(resolve => setTimeout(resolve, 300));
-          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          break;
         case WarningLevel.CRITICAL:
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          await new Promise(resolve => setTimeout(resolve, 150));
-          await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
-          await new Promise(resolve => setTimeout(resolve, 150));
+          await new Promise((resolve) => setTimeout(resolve, 300));
           await Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
           break;
         default:
@@ -169,21 +155,29 @@ export class AlarmManager {
     }
   }
 
+  /**
+   * Creates at most one siren player for the lifetime of the alarm and reuses
+   * it. `createAudioPlayer` allocates a native resource, so recreating it on
+   * every detection frame leaks and glitches the audio.
+   *
+   * The tone is a bundled asset so the alarm still works with no network — this
+   * is precisely the moment the driver most needs it.
+   */
   private playSiren(): void {
-    try {
-      if (this.sirenSound) {
-        this.sirenSound.remove();
-      }
+    if (this.sirenSound?.playing) {
+      return;
+    }
 
-      const player = createAudioPlayer(
-        'https://www.soundjay.com/misc/sounds/fail-buzzer-01.mp3'
-      );
-      player.loop = true;
-      player.volume = 1.0;
-      player.play();
-      this.sirenSound = player;
+    try {
+      if (!this.sirenSound) {
+        this.sirenSound = createAudioPlayer(require('../../assets/siren.wav'));
+        this.sirenSound.loop = true;
+        this.sirenSound.volume = 1.0;
+      }
+      this.sirenSound.play();
     } catch (error) {
       console.error('Siren playback failed, using fallback alert:', error);
+      this.sirenSound = null;
       try {
         void this.speak('Critical alert! Please pull over immediately!');
         Vibration.vibrate([0, 500, 200, 500, 200, 500]);
@@ -193,32 +187,12 @@ export class AlarmManager {
     }
   }
 
-  private startStrobe(): void {
-    if (this.isStrobing) return;
-    this.isStrobing = true;
-
-    let strobeCount = 0;
-    const maxStrobes = 20;
-    this.strobeInterval = setInterval(() => {
-      strobeCount++;
-      if (strobeCount >= maxStrobes) {
-        this.stopAllAlarms();
-        return;
-      }
-    }, 150);
-  }
-
   async stopAllAlarms(): Promise<void> {
     this.currentAlarmLevel = AlarmLevel.NONE;
 
-    if (this.isStrobing && this.strobeInterval) {
-      clearInterval(this.strobeInterval);
-      this.strobeInterval = null;
-      this.isStrobing = false;
-    }
-
     if (this.sirenSound) {
       try {
+        this.sirenSound.pause();
         this.sirenSound.remove();
       } catch (error) {
         console.error('Error releasing siren sound:', error);
@@ -244,7 +218,7 @@ export class AlarmManager {
   }
 
   cleanup(): void {
-    this.stopAllAlarms();
+    void this.stopAllAlarms();
   }
 }
 
@@ -255,4 +229,8 @@ export const getAlarmManager = (): AlarmManager => {
     alarmManagerInstance = new AlarmManager();
   }
   return alarmManagerInstance;
+};
+
+export const resetAlarmManagerForTests = (): void => {
+  alarmManagerInstance = null;
 };

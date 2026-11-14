@@ -1,52 +1,65 @@
 import { AlarmManager, AlarmLevel } from '../src/alarm/AlarmManager';
 import { WarningLevel, DetectionType } from '../src/types/SafetyTypes';
+import { createAudioPlayer } from 'expo-audio';
+import * as Speech from 'expo-speech';
 
 jest.mock('expo-audio', () => ({
-  setAudioModeAsync: jest.fn(),
-  createAudioPlayer: jest.fn(() => ({
-    play: jest.fn(),
-    pause: jest.fn(),
-    remove: jest.fn(),
-    loop: false,
-    volume: 1,
-  })),
+  setAudioModeAsync: jest.fn().mockResolvedValue(undefined),
+  createAudioPlayer: jest.fn(),
 }));
 
 jest.mock('expo-speech', () => ({
-  speak: jest.fn(),
-  stop: jest.fn(),
+  speak: jest.fn().mockResolvedValue(undefined),
+  stop: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('expo-haptics', () => ({
-  notificationAsync: jest.fn(),
-  impactAsync: jest.fn(),
-  ImpactFeedbackStyle: {
-    Heavy: 'Heavy',
-  },
-  NotificationFeedbackType: {
-    Warning: 'Warning',
-    Error: 'Error',
-  },
+  notificationAsync: jest.fn().mockResolvedValue(undefined),
+  impactAsync: jest.fn().mockResolvedValue(undefined),
+  ImpactFeedbackStyle: { Heavy: 'Heavy' },
+  NotificationFeedbackType: { Warning: 'Warning', Error: 'Error' },
 }));
 
 jest.mock('react-native', () => ({
-  Vibration: {
-    vibrate: jest.fn(),
-  },
-  Platform: {
-    OS: 'ios',
-  },
+  Vibration: { vibrate: jest.fn() },
+  Platform: { OS: 'android', select: (spec: { android?: unknown; default?: unknown }) => spec.default },
 }));
 
 jest.mock('expo-device', () => ({
   isDevice: true,
 }));
 
+type FakePlayer = {
+  play: jest.Mock;
+  pause: jest.Mock;
+  remove: jest.Mock;
+  loop: boolean;
+  volume: number;
+  playing: boolean;
+};
+
+const createFakePlayer = (): FakePlayer => {
+  const player: FakePlayer = {
+    play: jest.fn(function (this: FakePlayer) {
+      player.playing = true;
+    }),
+    pause: jest.fn(function (this: FakePlayer) {
+      player.playing = false;
+    }),
+    remove: jest.fn(),
+    loop: false,
+    volume: 1,
+    playing: false,
+  };
+  return player;
+};
+
 describe('AlarmManager', () => {
   let alarmManager: AlarmManager;
 
   beforeEach(() => {
     jest.clearAllMocks();
+    (createAudioPlayer as jest.Mock).mockImplementation(() => createFakePlayer());
     alarmManager = new AlarmManager();
   });
 
@@ -54,48 +67,137 @@ describe('AlarmManager', () => {
     alarmManager.cleanup();
   });
 
-  describe('constructor', () => {
-    it('should create AlarmManager with NONE alarm level', () => {
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.NONE);
+  describe('alarm level mapping', () => {
+    it.each([
+      [WarningLevel.NORMAL, AlarmLevel.NONE],
+      [WarningLevel.MILD, AlarmLevel.VOICE_ALERT],
+      [WarningLevel.MODERATE, AlarmLevel.HAPTIC_FEEDBACK],
+      [WarningLevel.SEVERE, AlarmLevel.SIREN],
+      [WarningLevel.CRITICAL, AlarmLevel.SIREN],
+    ])('maps warning %s to alarm %s', async (warning, expected) => {
+      await alarmManager.triggerAlarm(warning);
+
+      expect(alarmManager.getCurrentAlarmLevel()).toBe(expected);
+    });
+
+    it('starts inactive', () => {
       expect(alarmManager.isAlarmActive()).toBe(false);
     });
   });
 
-  describe('triggerAlarm', () => {
-    it('should set alarm level to VOICE_ALERT for MILD warning', async () => {
-      await alarmManager.triggerAlarm(WarningLevel.MILD);
+  describe('speech', () => {
+    it('speaks the detection-specific message when a detection is supplied', async () => {
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE, DetectionType.YAWN);
 
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.VOICE_ALERT);
+      expect(Speech.speak).toHaveBeenCalledWith(
+        expect.stringContaining('Yawning'),
+        expect.any(Object),
+      );
     });
 
-    it('should set alarm level to HAPTIC_FEEDBACK for MODERATE warning', async () => {
-      await alarmManager.triggerAlarm(WarningLevel.MODERATE);
-
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.HAPTIC_FEEDBACK);
-    });
-
-    it('should set alarm level to SIREN for SEVERE warning', async () => {
+    it('falls back to the level message with no detection', async () => {
       await alarmManager.triggerAlarm(WarningLevel.SEVERE);
 
+      expect(Speech.speak).toHaveBeenCalledWith(
+        expect.stringContaining('Pull over'),
+        expect.any(Object),
+      );
+    });
+  });
+
+  describe('siren', () => {
+    it('creates the player from the bundled asset, not a remote URL', async () => {
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+
+      expect(createAudioPlayer).toHaveBeenCalledTimes(1);
+
+      // Jest substitutes the binary asset with a stub object; what matters is
+      // that the source is a bundled module, never a network URL string.
+      const source = (createAudioPlayer as jest.Mock).mock.calls[0][0];
+      expect(typeof source).not.toBe('string');
+      expect(source).toEqual(expect.anything());
+    });
+
+    it('does not recreate the player when the alarm keeps sounding', async () => {
+      // The bug this guards: playSiren() removed and re-created the native
+      // player on every detection frame.
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+
+      expect(createAudioPlayer).toHaveBeenCalledTimes(1);
+    });
+
+    it('releases the player when the alarm stops', async () => {
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+
+      const player = (createAudioPlayer as jest.Mock).mock.results[0].value as FakePlayer;
+
+      await alarmManager.stopAllAlarms();
+
+      expect(player.pause).toHaveBeenCalled();
+      expect(player.remove).toHaveBeenCalled();
+      expect(alarmManager.isAlarmActive()).toBe(false);
+    });
+
+    it('degrades to haptics and voice when the asset fails to load', async () => {
+      (createAudioPlayer as jest.Mock).mockImplementationOnce(() => {
+        throw new Error('asset missing');
+      });
+
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+
+      // The alarm path must never throw, even without the bundled asset.
       expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.SIREN);
     });
+  });
 
-    it('should set alarm level to STROBE for CRITICAL warning', async () => {
-      await alarmManager.triggerAlarm(WarningLevel.CRITICAL);
+  describe('re-triggering', () => {
+    it('does not re-fire an alarm that is already sounding at the same level', async () => {
+      await alarmManager.triggerAlarm(WarningLevel.MODERATE);
+      await alarmManager.triggerAlarm(WarningLevel.MODERATE);
 
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.STROBE);
+      // One voice prompt, not one per detection frame.
+      expect(Speech.speak).toHaveBeenCalledTimes(1);
     });
 
-    it('should not trigger alarm for NORMAL warning', async () => {
-      await alarmManager.triggerAlarm(WarningLevel.NORMAL);
+    it('does re-fire when the warning level changes', async () => {
+      // Voice is on a cooldown, so step past it to isolate the level change.
+      const now = jest.spyOn(Date, 'now');
+      now.mockReturnValue(1_000_000);
 
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.NONE);
-      expect(alarmManager.isAlarmActive()).toBe(false);
+      await alarmManager.triggerAlarm(WarningLevel.MILD);
+      expect(Speech.speak).toHaveBeenCalledTimes(1);
+
+      now.mockReturnValue(1_000_000 + 6000);
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+      expect(Speech.speak).toHaveBeenCalledTimes(2);
+
+      now.mockRestore();
+    });
+
+    it('holds voice on cooldown while the level is unchanged', async () => {
+      const now = jest.spyOn(Date, 'now');
+      now.mockReturnValue(1_000_000);
+
+      await alarmManager.triggerAlarm(WarningLevel.MODERATE);
+      await alarmManager.triggerAlarm(WarningLevel.MODERATE);
+
+      expect(Speech.speak).toHaveBeenCalledTimes(1);
+      now.mockRestore();
+    });
+
+    it('escalates from voice to siren', async () => {
+      await alarmManager.triggerAlarm(WarningLevel.MILD);
+      expect(createAudioPlayer).not.toHaveBeenCalled();
+
+      await alarmManager.triggerAlarm(WarningLevel.SEVERE);
+      expect(createAudioPlayer).toHaveBeenCalledTimes(1);
     });
   });
 
   describe('stopAllAlarms', () => {
-    it('should reset alarm level to NONE', async () => {
+    it('silences a sounding alarm', async () => {
       await alarmManager.triggerAlarm(WarningLevel.CRITICAL);
       expect(alarmManager.isAlarmActive()).toBe(true);
 
@@ -103,39 +205,21 @@ describe('AlarmManager', () => {
 
       expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.NONE);
       expect(alarmManager.isAlarmActive()).toBe(false);
-    });
-  });
-
-  describe('getCurrentAlarmLevel', () => {
-    it('should return NONE initially', () => {
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.NONE);
+      expect(Speech.stop).toHaveBeenCalled();
     });
 
-    it('should return correct alarm level after triggerAlarm', async () => {
-      await alarmManager.triggerAlarm(WarningLevel.MODERATE);
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.HAPTIC_FEEDBACK);
-    });
-  });
-
-  describe('isAlarmActive', () => {
-    it('should return false when no alarm is active', () => {
+    it('is safe to call when nothing is sounding', async () => {
+      await expect(alarmManager.stopAllAlarms()).resolves.toBeUndefined();
       expect(alarmManager.isAlarmActive()).toBe(false);
-    });
-
-    it('should return true when an alarm is active', async () => {
-      await alarmManager.triggerAlarm(WarningLevel.MILD);
-      expect(alarmManager.isAlarmActive()).toBe(true);
     });
   });
 
   describe('cleanup', () => {
-    it('should stop all alarms and reset state', async () => {
+    it('stops the alarm', async () => {
       await alarmManager.triggerAlarm(WarningLevel.SEVERE);
-      expect(alarmManager.isAlarmActive()).toBe(true);
 
       alarmManager.cleanup();
 
-      expect(alarmManager.getCurrentAlarmLevel()).toBe(AlarmLevel.NONE);
       expect(alarmManager.isAlarmActive()).toBe(false);
     });
   });

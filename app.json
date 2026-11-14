@@ -6,6 +6,15 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
+    "plugins": [
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow Netra Driver Guardian to use the camera to monitor your alertness while driving.",
+          "recordAudioAndroid": false
+        }
+      ]
+    ],
     "ios": {
       "supportsTablet": true
     },
